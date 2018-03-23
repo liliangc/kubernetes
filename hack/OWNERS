@@ -1,7 +1,28 @@
-assignees:
+reviewers:
+  - cblecker
   - eparis
-  - ihmccreery
+  - fejta
   - ixdy
+  - jbeda
   - lavalamp
-  - spxtr
   - zmerlynn
+  - sttts
+  - gmarek
+  - vishh
+approvers:
+  - cblecker
+  - deads2k
+  - eparis
+  - fejta
+  - ixdy
+  - jbeda
+  - lavalamp
+  - madhusudancs
+  - pwittrock
+  - shashidharatd
+  - zmerlynn
+  - sttts
+  - gmarek
+  - vishh
+  - liggitt
+  - soltysh # for sig-cli related stuff

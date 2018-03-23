@@ -37,7 +37,7 @@ export LC_ALL=C
 # Process package content
 #
 # @param package  The incoming package name
-# @param type     The type of content (LICENSE or COPYRIGHT)
+# @param type     The type of content (LICENSE, COPYRIGHT or COPYING)
 #
 process_content () {
   local package=$1
@@ -57,13 +57,17 @@ process_content () {
                # Sadly inconsistent in the wild, but mostly license files
                # containing copyrights, but no readme/notice files containing
                # licenses (except to "see license file")
-               ensure_pattern="License|Copyright"
+               ensure_pattern="license|copyright"
                ;;
     # We search READMEs for copyrights and this includes notice files as well
     # Look in as many places as we find files matching
     COPYRIGHT) find_names=(-iname 'notice*' -o -iname 'readme*')
                find_maxdepth=3
-               ensure_pattern="Copyright"
+               ensure_pattern="copyright"
+               ;;
+      COPYING) find_names=(-iname 'copying*')
+               find_maxdepth=1
+               ensure_pattern="license|copyright"
                ;;
   esac
 
@@ -74,6 +78,14 @@ process_content () {
      ;;
     go4.org/*)
      package_root=$(echo ${package} |awk -F/ '{ print $1 }')
+     ;;
+    gopkg.in/*)
+     # Root of gopkg.in package always ends with '.v(number)' and my contain
+     # more than two path elements. For example:
+     # - gopkg.in/yaml.v2
+     # - gopkg.in/inf.v0
+     # - gopkg.in/square/go-jose.v2
+     package_root=$(echo ${package} |grep -oh '.*\.v[0-9]')
      ;;
     *)
      package_root=$(echo ${package} |awk -F/ '{ print $1"/"$2 }')
@@ -97,7 +109,7 @@ process_content () {
   if [[ -z "${CONTENT[${index}]-}" ]]; then
     for f in ${local_files[@]-}; do
       # Find some copyright info in any file and break
-      if egrep -wq "${ensure_pattern}" "${f}"; then
+      if egrep -i -wq "${ensure_pattern}" "${f}"; then
         CONTENT[${index}]="${f}"
         break
       fi
@@ -111,6 +123,19 @@ process_content () {
 #############################################################################
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
 source "${KUBE_ROOT}/hack/lib/init.sh"
+
+# Check bash version
+if ((${BASH_VERSINFO[0]}<4)); then
+  echo
+  echo "ERROR: Bash v4+ required."
+  # Extra help for OSX
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo
+    echo "Ensure you are up to date on the following packages:"
+    echo "$ brew install md5sha1sum bash jq"
+  fi
+  echo
+fi
 
 # This variable can be injected, as in the verify script.
 LICENSE_ROOT="${LICENSE_ROOT:-${KUBE_ROOT}}"
@@ -128,7 +153,7 @@ echo "= Kubernetes licensed under: ="
 echo
 cat ${LICENSE_ROOT}/LICENSE
 echo
-echo "= LICENSE $(cat ${LICENSE_ROOT}/LICENSE | md5sum)"
+echo "= LICENSE $(cat ${LICENSE_ROOT}/LICENSE | md5sum | awk '{print $1}')"
 echo "================================================================================"
 ) > ${TMP_LICENSE_FILE}
 
@@ -138,6 +163,7 @@ for PACKAGE in $(cat Godeps/Godeps.json | \
                  sort -f); do
   process_content ${PACKAGE} LICENSE
   process_content ${PACKAGE} COPYRIGHT
+  process_content ${PACKAGE} COPYING
 
   # display content
   echo
@@ -150,16 +176,18 @@ for PACKAGE in $(cat Godeps/Godeps.json | \
       file="${CONTENT[${PACKAGE}-LICENSE]-}"
   elif [[ -n "${CONTENT[${PACKAGE}-COPYRIGHT]-}" ]]; then
       file="${CONTENT[${PACKAGE}-COPYRIGHT]-}"
+  elif [[ -n "${CONTENT[${PACKAGE}-COPYING]-}" ]]; then
+      file="${CONTENT[${PACKAGE}-COPYING]-}"
   fi
   if [[ -z "${file}" ]]; then
       cat > /dev/stderr << __EOF__
 No license could be found for ${PACKAGE} - aborting.
 
 Options:
-1. Check if the upstream repository has a newer version with LICENSE and/or
-   COPYRIGHT files.
-2. Contact the author of the package to ensure there is a LICENSE and/or
-   COPYRIGHT file present.
+1. Check if the upstream repository has a newer version with LICENSE, COPYRIGHT and/or
+   COPYING files.
+2. Contact the author of the package to ensure there is a LICENSE, COPYRIGHT and/or
+   COPYING file present.
 3. Do not use this package in Kubernetes.
 __EOF__
       exit 9
@@ -167,7 +195,7 @@ __EOF__
   cat "${file}"
 
   echo
-  echo "= ${file} $(cat ${file} | md5sum)"
+  echo "= ${file} $(cat ${file} | md5sum | awk '{print $1}')"
   echo "================================================================================"
   echo
 done >> ${TMP_LICENSE_FILE}

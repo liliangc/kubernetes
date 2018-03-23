@@ -23,26 +23,32 @@ import (
 	"io/ioutil"
 	"time"
 
-	metrics_api "k8s.io/heapster/metrics/apis/metrics/v1alpha1"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	api "k8s.io/kubernetes/pkg/api/v1"
 	"testing"
+
+	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
+	metricsv1alpha1api "k8s.io/metrics/pkg/apis/metrics/v1alpha1"
+	metricsv1beta1api "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 )
 
 const (
-	baseHeapsterServiceAddress = "/api/v1/namespaces/kube-system/services/http:heapster:"
-	baseMetricsAddress         = baseHeapsterServiceAddress + "/proxy/apis/metrics"
+	baseHeapsterServiceAddress = "/api/v1/namespaces/kube-system/services/http:heapster:/proxy"
+	baseMetricsAddress         = baseHeapsterServiceAddress + "/apis/metrics"
+	baseMetricsServerAddress   = "/apis/metrics.k8s.io/v1beta1"
 	metricsApiVersion          = "v1alpha1"
 )
 
 func TestTopSubcommandsExist(t *testing.T) {
 	initTestErrorHandler(t)
 
-	f, _, _, _ := NewAPIFactory()
+	f := cmdtesting.NewTestFactory()
+	defer f.Cleanup()
+
 	buf := bytes.NewBuffer([]byte{})
 
-	cmd := NewCmdTop(f, buf)
+	cmd := NewCmdTop(f, buf, buf)
 	if !cmd.HasSubCommands() {
 		t.Error("top command should have subcommands")
 	}
@@ -56,96 +62,114 @@ func marshallBody(metrics interface{}) (io.ReadCloser, error) {
 	return ioutil.NopCloser(bytes.NewReader(result)), nil
 }
 
-func testNodeMetricsData() []metrics_api.NodeMetrics {
-	return []metrics_api.NodeMetrics{
-		{
-			ObjectMeta: api.ObjectMeta{Name: "node1", ResourceVersion: "10"},
-			Window:     unversioned.Duration{Duration: time.Minute},
-			Usage: api.ResourceList{
-				api.ResourceCPU:     *resource.NewMilliQuantity(1, resource.DecimalSI),
-				api.ResourceMemory:  *resource.NewQuantity(2*(1024*1024), resource.DecimalSI),
-				api.ResourceStorage: *resource.NewQuantity(3*(1024*1024), resource.DecimalSI),
-			},
+func testNodeV1alpha1MetricsData() (*metricsv1alpha1api.NodeMetricsList, *v1.NodeList) {
+	metrics := &metricsv1alpha1api.NodeMetricsList{
+		ListMeta: metav1.ListMeta{
+			ResourceVersion: "1",
 		},
-		{
-			ObjectMeta: api.ObjectMeta{Name: "node2", ResourceVersion: "11"},
-			Window:     unversioned.Duration{Duration: time.Minute},
-			Usage: api.ResourceList{
-				api.ResourceCPU:     *resource.NewMilliQuantity(5, resource.DecimalSI),
-				api.ResourceMemory:  *resource.NewQuantity(6*(1024*1024), resource.DecimalSI),
-				api.ResourceStorage: *resource.NewQuantity(7*(1024*1024), resource.DecimalSI),
+		Items: []metricsv1alpha1api.NodeMetrics{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "node1", ResourceVersion: "10"},
+				Window:     metav1.Duration{Duration: time.Minute},
+				Usage: v1.ResourceList{
+					v1.ResourceCPU:     *resource.NewMilliQuantity(1, resource.DecimalSI),
+					v1.ResourceMemory:  *resource.NewQuantity(2*(1024*1024), resource.DecimalSI),
+					v1.ResourceStorage: *resource.NewQuantity(3*(1024*1024), resource.DecimalSI),
+				},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "node2", ResourceVersion: "11"},
+				Window:     metav1.Duration{Duration: time.Minute},
+				Usage: v1.ResourceList{
+					v1.ResourceCPU:     *resource.NewMilliQuantity(5, resource.DecimalSI),
+					v1.ResourceMemory:  *resource.NewQuantity(6*(1024*1024), resource.DecimalSI),
+					v1.ResourceStorage: *resource.NewQuantity(7*(1024*1024), resource.DecimalSI),
+				},
 			},
 		},
 	}
+	nodes := &v1.NodeList{
+		ListMeta: metav1.ListMeta{
+			ResourceVersion: "15",
+		},
+		Items: []v1.Node{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "node1", ResourceVersion: "10"},
+				Status: v1.NodeStatus{
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:     *resource.NewMilliQuantity(10, resource.DecimalSI),
+						v1.ResourceMemory:  *resource.NewQuantity(20*(1024*1024), resource.DecimalSI),
+						v1.ResourceStorage: *resource.NewQuantity(30*(1024*1024), resource.DecimalSI),
+					},
+				},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "node2", ResourceVersion: "11"},
+				Status: v1.NodeStatus{
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:     *resource.NewMilliQuantity(50, resource.DecimalSI),
+						v1.ResourceMemory:  *resource.NewQuantity(60*(1024*1024), resource.DecimalSI),
+						v1.ResourceStorage: *resource.NewQuantity(70*(1024*1024), resource.DecimalSI),
+					},
+				},
+			},
+		},
+	}
+	return metrics, nodes
 }
 
-func testPodMetricsData() []metrics_api.PodMetrics {
-	return []metrics_api.PodMetrics{
-		{
-			ObjectMeta: api.ObjectMeta{Name: "pod1", Namespace: "test", ResourceVersion: "10"},
-			Window:     unversioned.Duration{Duration: time.Minute},
-			Containers: []metrics_api.ContainerMetrics{
-				{
-					Name: "container1-1",
-					Usage: api.ResourceList{
-						api.ResourceCPU:     *resource.NewMilliQuantity(1, resource.DecimalSI),
-						api.ResourceMemory:  *resource.NewQuantity(2*(1024*1024), resource.DecimalSI),
-						api.ResourceStorage: *resource.NewQuantity(3*(1024*1024), resource.DecimalSI),
-					},
+func testNodeV1beta1MetricsData() (*metricsv1beta1api.NodeMetricsList, *v1.NodeList) {
+	metrics := &metricsv1beta1api.NodeMetricsList{
+		ListMeta: metav1.ListMeta{
+			ResourceVersion: "1",
+		},
+		Items: []metricsv1beta1api.NodeMetrics{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "node1", ResourceVersion: "10", Labels: map[string]string{"key": "value"}},
+				Window:     metav1.Duration{Duration: time.Minute},
+				Usage: v1.ResourceList{
+					v1.ResourceCPU:     *resource.NewMilliQuantity(1, resource.DecimalSI),
+					v1.ResourceMemory:  *resource.NewQuantity(2*(1024*1024), resource.DecimalSI),
+					v1.ResourceStorage: *resource.NewQuantity(3*(1024*1024), resource.DecimalSI),
 				},
-				{
-					Name: "container1-2",
-					Usage: api.ResourceList{
-						api.ResourceCPU:     *resource.NewMilliQuantity(4, resource.DecimalSI),
-						api.ResourceMemory:  *resource.NewQuantity(5*(1024*1024), resource.DecimalSI),
-						api.ResourceStorage: *resource.NewQuantity(6*(1024*1024), resource.DecimalSI),
-					},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "node2", ResourceVersion: "11"},
+				Window:     metav1.Duration{Duration: time.Minute},
+				Usage: v1.ResourceList{
+					v1.ResourceCPU:     *resource.NewMilliQuantity(5, resource.DecimalSI),
+					v1.ResourceMemory:  *resource.NewQuantity(6*(1024*1024), resource.DecimalSI),
+					v1.ResourceStorage: *resource.NewQuantity(7*(1024*1024), resource.DecimalSI),
 				},
 			},
 		},
-		{
-			ObjectMeta: api.ObjectMeta{Name: "pod2", Namespace: "test", ResourceVersion: "11"},
-			Window:     unversioned.Duration{Duration: time.Minute},
-			Containers: []metrics_api.ContainerMetrics{
-				{
-					Name: "container2-1",
-					Usage: api.ResourceList{
-						api.ResourceCPU:     *resource.NewMilliQuantity(7, resource.DecimalSI),
-						api.ResourceMemory:  *resource.NewQuantity(8*(1024*1024), resource.DecimalSI),
-						api.ResourceStorage: *resource.NewQuantity(9*(1024*1024), resource.DecimalSI),
-					},
-				},
-				{
-					Name: "container2-2",
-					Usage: api.ResourceList{
-						api.ResourceCPU:     *resource.NewMilliQuantity(10, resource.DecimalSI),
-						api.ResourceMemory:  *resource.NewQuantity(11*(1024*1024), resource.DecimalSI),
-						api.ResourceStorage: *resource.NewQuantity(12*(1024*1024), resource.DecimalSI),
-					},
-				},
-				{
-					Name: "container2-3",
-					Usage: api.ResourceList{
-						api.ResourceCPU:     *resource.NewMilliQuantity(13, resource.DecimalSI),
-						api.ResourceMemory:  *resource.NewQuantity(14*(1024*1024), resource.DecimalSI),
-						api.ResourceStorage: *resource.NewQuantity(15*(1024*1024), resource.DecimalSI),
+	}
+	nodes := &v1.NodeList{
+		ListMeta: metav1.ListMeta{
+			ResourceVersion: "15",
+		},
+		Items: []v1.Node{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "node1", ResourceVersion: "10"},
+				Status: v1.NodeStatus{
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:     *resource.NewMilliQuantity(10, resource.DecimalSI),
+						v1.ResourceMemory:  *resource.NewQuantity(20*(1024*1024), resource.DecimalSI),
+						v1.ResourceStorage: *resource.NewQuantity(30*(1024*1024), resource.DecimalSI),
 					},
 				},
 			},
-		},
-		{
-			ObjectMeta: api.ObjectMeta{Name: "pod3", Namespace: "test", ResourceVersion: "12"},
-			Window:     unversioned.Duration{Duration: time.Minute},
-			Containers: []metrics_api.ContainerMetrics{
-				{
-					Name: "container3-1",
-					Usage: api.ResourceList{
-						api.ResourceCPU:     *resource.NewMilliQuantity(7, resource.DecimalSI),
-						api.ResourceMemory:  *resource.NewQuantity(8*(1024*1024), resource.DecimalSI),
-						api.ResourceStorage: *resource.NewQuantity(9*(1024*1024), resource.DecimalSI),
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "node2", ResourceVersion: "11"},
+				Status: v1.NodeStatus{
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:     *resource.NewMilliQuantity(50, resource.DecimalSI),
+						v1.ResourceMemory:  *resource.NewQuantity(60*(1024*1024), resource.DecimalSI),
+						v1.ResourceStorage: *resource.NewQuantity(70*(1024*1024), resource.DecimalSI),
 					},
 				},
 			},
 		},
 	}
+	return metrics, nodes
 }

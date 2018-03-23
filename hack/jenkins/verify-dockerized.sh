@@ -27,16 +27,17 @@ retry() {
 }
 
 # This script is intended to be run from kubekins-test container with a
-# kubernetes repo mapped in. See hack/jenkins/gotest-dockerized.sh
+# kubernetes repo mapped in. See k8s.io/test-infra/scenarios/kubernetes_verify.py
 
 export PATH=${GOPATH}/bin:${PWD}/third_party/etcd:/usr/local/go/bin:${PATH}
 
-retry go get github.com/tools/godep && godep version
-retry go get github.com/jteeuwen/go-bindata/go-bindata
+# Produce a JUnit-style XML test report
+export KUBE_JUNIT_REPORT_DIR=${WORKSPACE}/artifacts
+# Set artifacts directory
+export ARTIFACTS_DIR=${WORKSPACE}/artifacts
 
 export LOG_LEVEL=4
 
 cd /go/src/k8s.io/kubernetes
 
-./hack/install-etcd.sh
 make verify

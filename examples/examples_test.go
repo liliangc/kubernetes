@@ -26,27 +26,32 @@ import (
 	"testing"
 
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/api"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/kubernetes/pkg/api/testapi"
-	"k8s.io/kubernetes/pkg/api/validation"
+	"k8s.io/kubernetes/pkg/apis/apps"
+	appsvalidation "k8s.io/kubernetes/pkg/apis/apps/validation"
 	"k8s.io/kubernetes/pkg/apis/batch"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	expvalidation "k8s.io/kubernetes/pkg/apis/extensions/validation"
 	"k8s.io/kubernetes/pkg/capabilities"
-	"k8s.io/kubernetes/pkg/registry/job"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/types"
-	"k8s.io/kubernetes/pkg/util/validation/field"
-	"k8s.io/kubernetes/pkg/util/yaml"
-	schedulerapi "k8s.io/kubernetes/plugin/pkg/scheduler/api"
-	schedulerapilatest "k8s.io/kubernetes/plugin/pkg/scheduler/api/latest"
+	"k8s.io/kubernetes/pkg/registry/batch/job"
+	schedulerapi "k8s.io/kubernetes/pkg/scheduler/api"
+	schedulerapilatest "k8s.io/kubernetes/pkg/scheduler/api/latest"
+	schedulerapivalidation "k8s.io/kubernetes/pkg/scheduler/api/validation"
 )
 
 func validateObject(obj runtime.Object) (errors field.ErrorList) {
 	switch t := obj.(type) {
 	case *api.ReplicationController:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = validation.ValidateReplicationController(t)
 	case *api.ReplicationControllerList:
@@ -55,7 +60,7 @@ func validateObject(obj runtime.Object) (errors field.ErrorList) {
 		}
 	case *api.Service:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = validation.ValidateService(t)
 	case *api.ServiceList:
@@ -64,7 +69,7 @@ func validateObject(obj runtime.Object) (errors field.ErrorList) {
 		}
 	case *api.Pod:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = validation.ValidatePod(t)
 	case *api.PodList:
@@ -75,44 +80,44 @@ func validateObject(obj runtime.Object) (errors field.ErrorList) {
 		errors = validation.ValidatePersistentVolume(t)
 	case *api.PersistentVolumeClaim:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = validation.ValidatePersistentVolumeClaim(t)
 	case *api.PodTemplate:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = validation.ValidatePodTemplate(t)
 	case *api.Endpoints:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = validation.ValidateEndpoints(t)
 	case *api.Namespace:
 		errors = validation.ValidateNamespace(t)
 	case *api.Secret:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = validation.ValidateSecret(t)
 	case *api.LimitRange:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = validation.ValidateLimitRange(t)
 	case *api.ResourceQuota:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = validation.ValidateResourceQuota(t)
 	case *extensions.Deployment:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = expvalidation.ValidateDeployment(t)
 	case *batch.Job:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		// Job needs generateSelector called before validation, and job.Validate does this.
 		// See: https://github.com/kubernetes/kubernetes/issues/20951#issuecomment-187787040
@@ -120,19 +125,33 @@ func validateObject(obj runtime.Object) (errors field.ErrorList) {
 		errors = job.Strategy.Validate(nil, t)
 	case *extensions.Ingress:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = expvalidation.ValidateIngress(t)
 	case *extensions.DaemonSet:
 		if t.Namespace == "" {
-			t.Namespace = api.NamespaceDefault
+			t.Namespace = metav1.NamespaceDefault
 		}
 		errors = expvalidation.ValidateDaemonSet(t)
+	case *apps.StatefulSet:
+		if t.Namespace == "" {
+			t.Namespace = metav1.NamespaceDefault
+		}
+		errors = appsvalidation.ValidateStatefulSet(t)
 	default:
 		errors = field.ErrorList{}
 		errors = append(errors, field.InternalError(field.NewPath(""), fmt.Errorf("no validation defined for %#v", obj)))
 	}
 	return errors
+}
+
+func validateschedulerpolicy(obj runtime.Object) error {
+	switch t := obj.(type) {
+	case *schedulerapi.Policy:
+		return schedulerapivalidation.ValidatePolicy(*t)
+	default:
+		return fmt.Errorf("obj type is not schedulerapi.Policy")
+	}
 }
 
 func walkJSONFiles(inDir string, fn func(name, path string, data []byte)) error {
@@ -191,59 +210,15 @@ func TestExampleObjectSchemas(t *testing.T) {
 			"redis-master-service":    &api.Service{},
 			"redis-slave-service":     &api.Service{},
 		},
-		"../docs/user-guide/walkthrough": {
-			"pod-nginx":                 &api.Pod{},
-			"pod-nginx-with-label":      &api.Pod{},
-			"pod-redis":                 &api.Pod{},
-			"pod-with-http-healthcheck": &api.Pod{},
-			"service":                   &api.Service{},
-			"replication-controller":    &api.ReplicationController{},
-			"podtemplate":               &api.PodTemplate{},
-		},
-		"../docs/user-guide/update-demo": {
-			"kitten-rc":   &api.ReplicationController{},
-			"nautilus-rc": &api.ReplicationController{},
-		},
-		"../docs/user-guide/persistent-volumes/volumes": {
-			"local-01": &api.PersistentVolume{},
-			"local-02": &api.PersistentVolume{},
-			"gce":      &api.PersistentVolume{},
-			"nfs":      &api.PersistentVolume{},
-		},
-		"../docs/user-guide/persistent-volumes/claims": {
-			"claim-01": &api.PersistentVolumeClaim{},
-			"claim-02": &api.PersistentVolumeClaim{},
-			"claim-03": &api.PersistentVolumeClaim{},
-		},
-		"../docs/user-guide/persistent-volumes/simpletest": {
-			"namespace": &api.Namespace{},
-			"pod":       &api.Pod{},
-			"service":   &api.Service{},
-		},
 		"../examples/volumes/iscsi": {
-			"iscsi": &api.Pod{},
+			"chap-secret": &api.Secret{},
+			"iscsi":       &api.Pod{},
+			"iscsi-chap":  &api.Pod{},
 		},
 		"../examples/volumes/glusterfs": {
 			"glusterfs-pod":       &api.Pod{},
 			"glusterfs-endpoints": &api.Endpoints{},
 			"glusterfs-service":   &api.Service{},
-		},
-		"../docs/user-guide/liveness": {
-			"exec-liveness": &api.Pod{},
-			"http-liveness": &api.Pod{},
-		},
-		"../docs/user-guide": {
-			"multi-pod":            nil,
-			"pod":                  &api.Pod{},
-			"job":                  &batch.Job{},
-			"ingress":              &extensions.Ingress{},
-			"nginx-deployment":     &extensions.Deployment{},
-			"new-nginx-deployment": &extensions.Deployment{},
-			"replication":          &api.ReplicationController{},
-			"deployment":           &extensions.Deployment{},
-		},
-		"../docs/admin": {
-			"daemon": &extensions.DaemonSet{},
 		},
 		"../examples": {
 			"scheduler-policy-config":               &schedulerapi.Policy{},
@@ -256,18 +231,6 @@ func TestExampleObjectSchemas(t *testing.T) {
 			"rbd":             &api.Pod{},
 			"rbd-with-secret": &api.Pod{},
 		},
-		"../examples/storage/cassandra": {
-			"cassandra-daemonset":  &extensions.DaemonSet{},
-			"cassandra-controller": &api.ReplicationController{},
-			"cassandra-service":    &api.Service{},
-		},
-		"../examples/celery-rabbitmq": {
-			"celery-controller":   &api.ReplicationController{},
-			"flower-controller":   &api.ReplicationController{},
-			"flower-service":      &api.Service{},
-			"rabbitmq-controller": &api.ReplicationController{},
-			"rabbitmq-service":    &api.Service{},
-		},
 		"../examples/cluster-dns": {
 			"dns-backend-rc":      &api.ReplicationController{},
 			"dns-backend-service": &api.Service{},
@@ -275,37 +238,12 @@ func TestExampleObjectSchemas(t *testing.T) {
 			"namespace-dev":       &api.Namespace{},
 			"namespace-prod":      &api.Namespace{},
 		},
-		"../docs/user-guide/downward-api": {
-			"dapi-pod": &api.Pod{},
-		},
-		"../docs/user-guide/downward-api/volume/": {
-			"dapi-volume": &api.Pod{},
-		},
-		"../examples/elasticsearch": {
-			"es-rc":           &api.ReplicationController{},
-			"es-svc":          &api.Service{},
-			"service-account": nil,
-		},
 		"../examples/explorer": {
 			"pod": &api.Pod{},
 		},
 		"../examples/storage/hazelcast": {
-			"hazelcast-controller": &api.ReplicationController{},
+			"hazelcast-deployment": &extensions.Deployment{},
 			"hazelcast-service":    &api.Service{},
-		},
-		"../docs/admin/namespaces": {
-			"namespace-dev":  &api.Namespace{},
-			"namespace-prod": &api.Namespace{},
-		},
-		"../docs/admin/limitrange": {
-			"invalid-pod": &api.Pod{},
-			"limits":      &api.LimitRange{},
-			"namespace":   &api.Namespace{},
-			"valid-pod":   &api.Pod{},
-		},
-		"../docs/user-guide/logging-demo": {
-			"synthetic_0_25lps": &api.Pod{},
-			"synthetic_10lps":   &api.Pod{},
 		},
 		"../examples/meteor": {
 			"meteor-controller": &api.ReplicationController{},
@@ -328,16 +266,13 @@ func TestExampleObjectSchemas(t *testing.T) {
 			"nfs-web-rc":         &api.ReplicationController{},
 			"nfs-web-service":    &api.Service{},
 		},
-		"../docs/user-guide/node-selection": {
-			"pod": &api.Pod{},
-		},
 		"../examples/openshift-origin": {
 			"openshift-origin-namespace": &api.Namespace{},
-			"openshift-controller":       &api.ReplicationController{},
+			"openshift-controller":       &extensions.Deployment{},
 			"openshift-service":          &api.Service{},
-			"etcd-controller":            &api.ReplicationController{},
+			"etcd-controller":            &extensions.Deployment{},
 			"etcd-service":               &api.Service{},
-			"etcd-discovery-controller":  &api.ReplicationController{},
+			"etcd-discovery-controller":  &extensions.Deployment{},
 			"etcd-discovery-service":     &api.Service{},
 			"secret":                     nil,
 		},
@@ -348,14 +283,8 @@ func TestExampleObjectSchemas(t *testing.T) {
 		"../examples/storage/redis": {
 			"redis-controller":          &api.ReplicationController{},
 			"redis-master":              &api.Pod{},
-			"redis-proxy":               &api.Pod{},
 			"redis-sentinel-controller": &api.ReplicationController{},
 			"redis-sentinel-service":    &api.Service{},
-		},
-		"../docs/admin/resourcequota": {
-			"namespace": &api.Namespace{},
-			"limits":    &api.LimitRange{},
-			"quota":     &api.ResourceQuota{},
 		},
 		"../examples/storage/rethinkdb": {
 			"admin-pod":      &api.Pod{},
@@ -363,19 +292,15 @@ func TestExampleObjectSchemas(t *testing.T) {
 			"driver-service": &api.Service{},
 			"rc":             &api.ReplicationController{},
 		},
-		"../docs/user-guide/secrets": {
-			"secret-pod":     &api.Pod{},
-			"secret":         &api.Secret{},
-			"secret-env-pod": &api.Pod{},
-		},
 		"../examples/spark": {
-			"namespace-spark-cluster": &api.Namespace{},
-			"spark-master-controller": &api.ReplicationController{},
-			"spark-master-service":    &api.Service{},
-			"spark-webui":             &api.Service{},
-			"spark-worker-controller": &api.ReplicationController{},
-			"zeppelin-controller":     &api.ReplicationController{},
-			"zeppelin-service":        &api.Service{},
+			"namespace-spark-cluster":   &api.Namespace{},
+			"spark-master-controller":   &api.ReplicationController{},
+			"spark-master-service":      &api.Service{},
+			"spark-ui-proxy-controller": &api.ReplicationController{},
+			"spark-ui-proxy-service":    &api.Service{},
+			"spark-worker-controller":   &api.ReplicationController{},
+			"zeppelin-controller":       &api.ReplicationController{},
+			"zeppelin-service":          &api.Service{},
 		},
 		"../examples/spark/spark-gluster": {
 			"spark-master-service":    &api.Service{},
@@ -404,6 +329,9 @@ func TestExampleObjectSchemas(t *testing.T) {
 		"../examples/volumes/azure_file": {
 			"azure": &api.Pod{},
 		},
+		"../examples/volumes/azure_disk": {
+			"azure": &api.Pod{},
+		},
 	}
 
 	capabilities.SetForTests(capabilities.Capabilities{
@@ -428,7 +356,10 @@ func TestExampleObjectSchemas(t *testing.T) {
 					t.Errorf("%s did not decode correctly: %v\n%s", path, err, string(data))
 					return
 				}
-				//TODO: Add validate method for &schedulerapi.Policy
+				if err := validateschedulerpolicy(expectedType); err != nil {
+					t.Errorf("%s did not validate correctly: %v\n%s", path, err, string(data))
+					return
+				}
 			} else {
 				codec, err := testapi.GetCodecForObject(expectedType)
 				if err != nil {
@@ -477,8 +408,7 @@ func TestReadme(t *testing.T) {
 		expectedType []runtime.Object
 	}{
 		{"../README.md", []runtime.Object{&api.Pod{}}},
-		{"../docs/user-guide/walkthrough/README.md", []runtime.Object{&api.Pod{}}},
-		{"../examples/volumes/iscsi/README.md", []runtime.Object{&api.Pod{}}},
+		{"../examples/volumes/iscsi/README.md", []runtime.Object{&api.Secret{}}},
 	}
 
 	for _, path := range paths {

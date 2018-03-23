@@ -18,7 +18,7 @@ KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../..
 source "${KUBE_ROOT}/hack/lib/init.sh"
 
 focus=${FOCUS:-""}
-skip=${SKIP:-""}
+skip=${SKIP-"\[Flaky\]|\[Slow\]|\[Serial\]"}
 # The number of tests that can run in parallel depends on what tests
 # are running and on the size of the node. Too many, and tests will
 # fail due to resource contention. 8 is a reasonable default for a
@@ -26,36 +26,14 @@ skip=${SKIP:-""}
 # Currently, parallelism only affects when REMOTE=true. For local test,
 # ginkgo default parallelism (cores - 1) is used.
 parallelism=${PARALLELISM:-8}
-report=${REPORT:-"/tmp/"}
-artifacts=${ARTIFACTS:-"/tmp/_artifacts"}
+artifacts=${ARTIFACTS:-"/tmp/_artifacts/`date +%y%m%dT%H%M%S`"}
 remote=${REMOTE:-"false"}
-images=${IMAGES:-""}
-hosts=${HOSTS:-""}
-metadata=${INSTANCE_METADATA:-""}
-gci_image=$(gcloud compute images list --project google-containers \
-    --no-standard-images --regexp="gci-dev.*" --format="table[no-heading](name)")
-if [[ $hosts == "" && $images == "" ]]; then
-  images=$gci_image
-  metadata="user-data<${KUBE_ROOT}/test/e2e_node/jenkins/gci-init.yaml"
-fi
-image_project=${IMAGE_PROJECT:-"google-containers"}
-instance_prefix=${INSTANCE_PREFIX:-"test"}
-cleanup=${CLEANUP:-"true"}
-delete_instances=${DELETE_INSTANCES:-"false"}
+runtime=${RUNTIME:-"docker"}
+container_runtime_endpoint=${CONTAINER_RUNTIME_ENDPOINT:-""}
+image_service_endpoint=${IMAGE_SERVICE_ENDPOINT:-""}
 run_until_failure=${RUN_UNTIL_FAILURE:-"false"}
-list_images=${LIST_IMAGES:-"false"}
 test_args=${TEST_ARGS:-""}
-
-if  [[ $list_images == "true" ]]; then
-  gcloud compute images list --project="${image_project}" | grep "e2e-node"
-  exit 0
-fi
-
-ginkgo=$(kube::util::find-binary "ginkgo")
-if [[ -z "${ginkgo}" ]]; then
-  echo "You do not appear to have ginkgo built. Try 'make WHAT=vendor/github.com/onsi/ginkgo/ginkgo'"
-  exit 1
-fi
+system_spec_name=${SYSTEM_SPEC_NAME:-}
 
 # Parse the flags to pass to ginkgo
 ginkgoflags=""
@@ -64,37 +42,70 @@ if [[ $parallelism > 1 ]]; then
 fi
 
 if [[ $focus != "" ]]; then
-  ginkgoflags="$ginkgoflags -focus=$focus "
+  ginkgoflags="$ginkgoflags -focus=\"$focus\" "
 fi
 
 if [[ $skip != "" ]]; then
-  ginkgoflags="$ginkgoflags -skip=$skip "
+  ginkgoflags="$ginkgoflags -skip=\"$skip\" "
 fi
 
 if [[ $run_until_failure != "" ]]; then
   ginkgoflags="$ginkgoflags -untilItFails=$run_until_failure "
 fi
 
+# Setup the directory to copy test artifacts (logs, junit.xml, etc) from remote host to local host
+if [ ! -d "${artifacts}" ]; then
+  echo "Creating artifacts directory at ${artifacts}"
+  mkdir -p ${artifacts}
+fi
+echo "Test artifacts will be written to ${artifacts}"
+
+if [[ $runtime == "remote" ]] ; then
+  if [[ ! -z $container_runtime_endpoint ]] ; then
+    test_args="--container-runtime-endpoint=${container_runtime_endpoint} $test_args"
+  fi
+  if [[ ! -z $image_service_endpoint ]] ; then
+    test_args="--image-service-endpoint=$image_service_endpoint $test_args"
+  fi
+fi
+
 
 if [ $remote = true ] ; then
-  # Setup the directory to copy test artifacts (logs, junit.xml, etc) from remote host to local host
-  if [ ! -d "${artifacts}" ]; then
-    echo "Creating artifacts directory at ${artifacts}"
-    mkdir -p ${artifacts}
+  # The following options are only valid in remote run.
+  images=${IMAGES:-""}
+  hosts=${HOSTS:-""}
+  image_project=${IMAGE_PROJECT:-"kubernetes-node-e2e-images"}
+  metadata=${INSTANCE_METADATA:-""}
+  list_images=${LIST_IMAGES:-false}
+  if  [[ $list_images == "true" ]]; then
+    gcloud compute images list --project="${image_project}" | grep "e2e-node"
+    exit 0
   fi
-  echo "Test artifacts will be written to ${artifacts}"
+  gubernator=${GUBERNATOR:-"false"}
+  image_config_file=${IMAGE_CONFIG_FILE:-""}
+  if [[ $hosts == "" && $images == "" && $image_config_file == "" ]]; then
+    image_project=${IMAGE_PROJECT:-"cos-cloud"}
+    gci_image=$(gcloud compute images list --project $image_project \
+    --no-standard-images --filter="name ~ 'cos-beta.*'" --format="table[no-heading](name)")
+    images=$gci_image
+    metadata="user-data<${KUBE_ROOT}/test/e2e_node/jenkins/gci-init.yaml,gci-update-strategy=update_disabled"
+  fi
+  instance_prefix=${INSTANCE_PREFIX:-"test"}
+  cleanup=${CLEANUP:-"true"}
+  delete_instances=${DELETE_INSTANCES:-"false"}
+  test_suite=${TEST_SUITE:-"default"}
 
   # Get the compute zone
   zone=$(gcloud info --format='value(config.properties.compute.zone)')
   if [[ $zone == "" ]]; then
-    echo "Could not find gcloud compute/zone when running:\ngcloud info --format='value(config.properties.compute.zone)'"
+    echo "Could not find gcloud compute/zone when running: \`gcloud info --format='value(config.properties.compute.zone)'\`"
     exit 1
   fi
 
   # Get the compute project
   project=$(gcloud info --format='value(config.project)')
   if [[ $project == "" ]]; then
-    echo "Could not find gcloud project when running:\ngcloud info --format='value(config.project)'"
+    echo "Could not find gcloud project when running: \`gcloud info --format='value(config.project)'\`"
     exit 1
   fi
 
@@ -128,44 +139,39 @@ if [ $remote = true ] ; then
   echo "Hosts: $hosts"
   echo "Ginkgo Flags: $ginkgoflags"
   echo "Instance Metadata: $metadata"
+  echo "Image Config File: $image_config_file"
   # Invoke the runner
-  go run test/e2e_node/runner/run_e2e.go  --logtostderr --vmodule=*=4 --ssh-env="gce" \
-    --zone="$zone" --project="$project"  \
+  go run test/e2e_node/runner/remote/run_remote.go  --logtostderr --vmodule=*=4 --ssh-env="gce" \
+    --zone="$zone" --project="$project" --gubernator="$gubernator" \
     --hosts="$hosts" --images="$images" --cleanup="$cleanup" \
     --results-dir="$artifacts" --ginkgo-flags="$ginkgoflags" \
-    --image-project="$image_project" --instance-name-prefix="$instance_prefix" --setup-node="true" \
-    --delete-instances="$delete_instances" --test_args="$test_args" --instance-metadata="$metadata"
+    --image-project="$image_project" --instance-name-prefix="$instance_prefix" \
+    --delete-instances="$delete_instances" --test_args="$test_args" --instance-metadata="$metadata" \
+    --image-config-file="$image_config_file" --system-spec-name="$system_spec_name" \
+    --test-suite="$test_suite" \
+    2>&1 | tee -i "${artifacts}/build-log.txt"
   exit $?
 
 else
-  # Refresh sudo credentials if not running on GCE.
+  # Refresh sudo credentials for local run
   if ! ping -c 1 -q metadata.google.internal &> /dev/null; then
+    echo "Updating sudo credentials"
     sudo -v || exit 1
   fi
 
-  # If the flag --disable-kubenet is not set, set true by default.
-  if ! [[ $test_args =~ "--disable-kubenet" ]]; then
-    test_args="$test_args --disable-kubenet=true"
-  fi
+  # Do not use any network plugin by default. User could override the flags with
+  # test_args.
+  test_args='--kubelet-flags="--network-plugin= --cni-bin-dir=" '$test_args
 
-  # On selinux enabled systems, it might
-  # require to relabel /var/lib/kubelet
-  if which selinuxenabled &> /dev/null && \
-     selinuxenabled && \
-     which chcon > /dev/null ; then
-     mkdir -p /var/lib/kubelet
-     if [[ ! $(ls -Zd /var/lib/kubelet) =~ svirt_sandbox_file_t ]] ; then
-        echo "Applying SELinux label to /var/lib/kubelet directory."
-        if ! sudo chcon -Rt svirt_sandbox_file_t /var/lib/kubelet; then
-           echo "Failed to apply selinux label to /var/lib/kubelet."
-        fi
-     fi
-  fi
+  # Runtime flags
+  test_args='--kubelet-flags="--container-runtime='$runtime'" '$test_args
 
   # Test using the host the script was run on
   # Provided for backwards compatibility
-  "${ginkgo}" $ginkgoflags "${KUBE_ROOT}/test/e2e_node/" --report-dir=${report} \
-    -- --alsologtostderr --v 2 --node-name $(hostname) --build-services=true \
-    --start-services=true --stop-services=true $test_args
+  go run test/e2e_node/runner/local/run_local.go \
+    --system-spec-name="$system_spec_name" --ginkgo-flags="$ginkgoflags" \
+    --test-flags="--container-runtime=${runtime} \
+    --alsologtostderr --v 4 --report-dir=${artifacts} --node-name $(hostname) \
+    $test_args" --build-dependencies=true 2>&1 | tee -i "${artifacts}/build-log.txt"
   exit $?
 fi

@@ -21,11 +21,13 @@ import (
 	"errors"
 	"fmt"
 
-	metrics_api "k8s.io/heapster/metrics/apis/metrics/v1alpha1"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/api/validation"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
+	metricsapi "k8s.io/metrics/pkg/apis/metrics"
+	metricsv1alpha1api "k8s.io/metrics/pkg/apis/metrics/v1alpha1"
 )
 
 const (
@@ -38,23 +40,23 @@ const (
 var (
 	prefix       = "/apis"
 	groupVersion = fmt.Sprintf("%s/%s", metricsGv.Group, metricsGv.Version)
-	MetricsRoot  = fmt.Sprintf("%s/%s", prefix, groupVersion)
+	metricsRoot  = fmt.Sprintf("%s/%s", prefix, groupVersion)
 
 	// TODO: get this from metrics api once it's finished
-	metricsGv = unversioned.GroupVersion{Group: "metrics", Version: "v1alpha1"}
+	metricsGv = schema.GroupVersion{Group: "metrics", Version: "v1alpha1"}
 )
 
 type HeapsterMetricsClient struct {
-	Client            *client.Client
+	SVCClient         corev1.ServicesGetter
 	HeapsterNamespace string
 	HeapsterScheme    string
 	HeapsterService   string
 	HeapsterPort      string
 }
 
-func NewHeapsterMetricsClient(client *client.Client, namespace, scheme, service, port string) *HeapsterMetricsClient {
+func NewHeapsterMetricsClient(svcClient corev1.ServicesGetter, namespace, scheme, service, port string) *HeapsterMetricsClient {
 	return &HeapsterMetricsClient{
-		Client:            client,
+		SVCClient:         svcClient,
 		HeapsterNamespace: namespace,
 		HeapsterScheme:    scheme,
 		HeapsterService:   service,
@@ -62,11 +64,14 @@ func NewHeapsterMetricsClient(client *client.Client, namespace, scheme, service,
 	}
 }
 
-func DefaultHeapsterMetricsClient(client *client.Client) *HeapsterMetricsClient {
-	return NewHeapsterMetricsClient(client, DefaultHeapsterNamespace, DefaultHeapsterScheme, DefaultHeapsterService, DefaultHeapsterPort)
+func DefaultHeapsterMetricsClient(svcClient corev1.ServicesGetter) *HeapsterMetricsClient {
+	return NewHeapsterMetricsClient(svcClient, DefaultHeapsterNamespace, DefaultHeapsterScheme, DefaultHeapsterService, DefaultHeapsterPort)
 }
 
-func PodMetricsUrl(namespace string, name string) (string, error) {
+func podMetricsUrl(namespace string, name string) (string, error) {
+	if namespace == metav1.NamespaceAll {
+		return fmt.Sprintf("%s/pods", metricsRoot), nil
+	}
 	errs := validation.ValidateNamespaceName(namespace, false)
 	if len(errs) > 0 {
 		message := fmt.Sprintf("invalid namespace: %s - %v", namespace, errs)
@@ -79,10 +84,10 @@ func PodMetricsUrl(namespace string, name string) (string, error) {
 			return "", errors.New(message)
 		}
 	}
-	return fmt.Sprintf("%s/namespaces/%s/pods/%s", MetricsRoot, namespace, name), nil
+	return fmt.Sprintf("%s/namespaces/%s/pods/%s", metricsRoot, namespace, name), nil
 }
 
-func NodeMetricsUrl(name string) (string, error) {
+func nodeMetricsUrl(name string) (string, error) {
 	if len(name) > 0 {
 		errs := validation.ValidateNodeName(name, false)
 		if len(errs) > 0 {
@@ -90,84 +95,80 @@ func NodeMetricsUrl(name string) (string, error) {
 			return "", errors.New(message)
 		}
 	}
-	return fmt.Sprintf("%s/nodes/%s", MetricsRoot, name), nil
+	return fmt.Sprintf("%s/nodes/%s", metricsRoot, name), nil
 }
 
-func (cli *HeapsterMetricsClient) GetNodeMetrics(nodeName string, selector string) ([]metrics_api.NodeMetrics, error) {
+func (cli *HeapsterMetricsClient) GetNodeMetrics(nodeName string, selector string) (*metricsapi.NodeMetricsList, error) {
 	params := map[string]string{"labelSelector": selector}
-	path, err := NodeMetricsUrl(nodeName)
+	path, err := nodeMetricsUrl(nodeName)
 	if err != nil {
-		return []metrics_api.NodeMetrics{}, err
+		return nil, err
 	}
 	resultRaw, err := GetHeapsterMetrics(cli, path, params)
 	if err != nil {
-		return []metrics_api.NodeMetrics{}, err
+		return nil, err
 	}
-	metrics := make([]metrics_api.NodeMetrics, 0)
+	versionedMetrics := metricsv1alpha1api.NodeMetricsList{}
 	if len(nodeName) == 0 {
-		err = json.Unmarshal(resultRaw, &metrics)
+		err = json.Unmarshal(resultRaw, &versionedMetrics)
 		if err != nil {
-			return []metrics_api.NodeMetrics{}, fmt.Errorf("failed to unmarshall heapster response: %v", err)
+			return nil, fmt.Errorf("failed to unmarshall heapster response: %v", err)
 		}
 	} else {
-		var singleMetric metrics_api.NodeMetrics
+		var singleMetric metricsv1alpha1api.NodeMetrics
 		err = json.Unmarshal(resultRaw, &singleMetric)
 		if err != nil {
-			return []metrics_api.NodeMetrics{}, fmt.Errorf("failed to unmarshall heapster response: %v", err)
+			return nil, fmt.Errorf("failed to unmarshall heapster response: %v", err)
 		}
-		metrics = append(metrics, singleMetric)
+		versionedMetrics.Items = []metricsv1alpha1api.NodeMetrics{singleMetric}
+	}
+	metrics := &metricsapi.NodeMetricsList{}
+	err = metricsv1alpha1api.Convert_v1alpha1_NodeMetricsList_To_metrics_NodeMetricsList(&versionedMetrics, metrics, nil)
+	if err != nil {
+		return nil, err
 	}
 	return metrics, nil
 }
 
-func (cli *HeapsterMetricsClient) GetPodMetrics(namespace string, podName string, allNamespaces bool, selector string) ([]metrics_api.PodMetrics, error) {
-	// TODO: extend Master Metrics API with getting pods from all namespaces
-	// instead of aggregating the results here
-	namespaces := make([]string, 0)
+func (cli *HeapsterMetricsClient) GetPodMetrics(namespace string, podName string, allNamespaces bool, selector labels.Selector) (*metricsapi.PodMetricsList, error) {
 	if allNamespaces {
-		list, err := cli.Client.Namespaces().List(api.ListOptions{})
-		if err != nil {
-			return []metrics_api.PodMetrics{}, err
-		}
-		for _, ns := range list.Items {
-			namespaces = append(namespaces, ns.Name)
-		}
-	} else {
-		namespaces = append(namespaces, namespace)
+		namespace = metav1.NamespaceAll
+	}
+	path, err := podMetricsUrl(namespace, podName)
+	if err != nil {
+		return nil, err
 	}
 
-	params := map[string]string{"labelSelector": selector}
-	allMetrics := make([]metrics_api.PodMetrics, 0)
-	for _, ns := range namespaces {
-		path, err := PodMetricsUrl(ns, podName)
-		if err != nil {
-			return []metrics_api.PodMetrics{}, err
-		}
-		resultRaw, err := GetHeapsterMetrics(cli, path, params)
-		if err != nil {
-			return []metrics_api.PodMetrics{}, err
-		}
-		if len(podName) == 0 {
-			metrics := make([]metrics_api.PodMetrics, 0)
-			err = json.Unmarshal(resultRaw, &metrics)
-			if err != nil {
-				return []metrics_api.PodMetrics{}, fmt.Errorf("failed to unmarshall heapster response: %v", err)
-			}
-			allMetrics = append(allMetrics, metrics...)
-		} else {
-			var singleMetric metrics_api.PodMetrics
-			err = json.Unmarshal(resultRaw, &singleMetric)
-			if err != nil {
-				return []metrics_api.PodMetrics{}, fmt.Errorf("failed to unmarshall heapster response: %v", err)
-			}
-			allMetrics = append(allMetrics, singleMetric)
-		}
+	params := map[string]string{"labelSelector": selector.String()}
+	versionedMetrics := metricsv1alpha1api.PodMetricsList{}
+
+	resultRaw, err := GetHeapsterMetrics(cli, path, params)
+	if err != nil {
+		return nil, err
 	}
-	return allMetrics, nil
+	if len(podName) == 0 {
+		err = json.Unmarshal(resultRaw, &versionedMetrics)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshall heapster response: %v", err)
+		}
+	} else {
+		var singleMetric metricsv1alpha1api.PodMetrics
+		err = json.Unmarshal(resultRaw, &singleMetric)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshall heapster response: %v", err)
+		}
+		versionedMetrics.Items = []metricsv1alpha1api.PodMetrics{singleMetric}
+	}
+	metrics := &metricsapi.PodMetricsList{}
+	err = metricsv1alpha1api.Convert_v1alpha1_PodMetricsList_To_metrics_PodMetricsList(&versionedMetrics, metrics, nil)
+	if err != nil {
+		return nil, err
+	}
+	return metrics, nil
 }
 
 func GetHeapsterMetrics(cli *HeapsterMetricsClient, path string, params map[string]string) ([]byte, error) {
-	return cli.Client.Services(cli.HeapsterNamespace).
+	return cli.SVCClient.Services(cli.HeapsterNamespace).
 		ProxyGet(cli.HeapsterScheme, cli.HeapsterService, cli.HeapsterPort, path, params).
 		DoRaw()
 }

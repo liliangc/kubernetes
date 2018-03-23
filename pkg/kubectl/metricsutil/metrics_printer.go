@@ -19,22 +19,22 @@ package metricsutil
 import (
 	"fmt"
 	"io"
-	"time"
+	"sort"
 
-	metrics_api "k8s.io/heapster/metrics/apis/metrics/v1alpha1"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/kubectl"
+	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	"k8s.io/kubernetes/pkg/printers"
+	metricsapi "k8s.io/metrics/pkg/apis/metrics"
 )
 
 var (
 	MeasuredResources = []v1.ResourceName{
 		v1.ResourceCPU,
 		v1.ResourceMemory,
-		v1.ResourceStorage,
 	}
-	NodeColumns     = []string{"NAME", "CPU (cores)", "MEMORY (bytes)", "STORAGE (bytes)", "TIMESTAMP"}
-	PodColumns      = []string{"NAME", "CPU (cores)", "MEMORY (bytes)", "STORAGE (bytes)", "TIMESTAMP"}
+	NodeColumns     = []string{"NAME", "CPU(cores)", "CPU%", "MEMORY(bytes)", "MEMORY%"}
+	PodColumns      = []string{"NAME", "CPU(cores)", "MEMORY(bytes)"}
 	NamespaceColumn = "NAMESPACE"
 	PodColumn       = "POD"
 )
@@ -42,7 +42,7 @@ var (
 type ResourceMetricsInfo struct {
 	Name      string
 	Metrics   v1.ResourceList
-	Timestamp string
+	Available v1.ResourceList
 }
 
 type TopCmdPrinter struct {
@@ -53,29 +53,38 @@ func NewTopCmdPrinter(out io.Writer) *TopCmdPrinter {
 	return &TopCmdPrinter{out: out}
 }
 
-func (printer *TopCmdPrinter) PrintNodeMetrics(metrics []metrics_api.NodeMetrics) error {
+func (printer *TopCmdPrinter) PrintNodeMetrics(metrics []metricsapi.NodeMetrics, availableResources map[string]v1.ResourceList) error {
 	if len(metrics) == 0 {
 		return nil
 	}
-	w := kubectl.GetNewTabWriter(printer.out)
+	w := printers.GetNewTabWriter(printer.out)
 	defer w.Flush()
 
+	sort.Slice(metrics, func(i, j int) bool {
+		return metrics[i].Name < metrics[j].Name
+	})
+
 	printColumnNames(w, NodeColumns)
+	var usage v1.ResourceList
 	for _, m := range metrics {
+		err := legacyscheme.Scheme.Convert(&m.Usage, &usage, nil)
+		if err != nil {
+			return err
+		}
 		printMetricsLine(w, &ResourceMetricsInfo{
 			Name:      m.Name,
-			Metrics:   m.Usage,
-			Timestamp: m.Timestamp.Time.Format(time.RFC1123Z),
+			Metrics:   usage,
+			Available: availableResources[m.Name],
 		})
 	}
 	return nil
 }
 
-func (printer *TopCmdPrinter) PrintPodMetrics(metrics []metrics_api.PodMetrics, printContainers bool, withNamespace bool) error {
+func (printer *TopCmdPrinter) PrintPodMetrics(metrics []metricsapi.PodMetrics, printContainers bool, withNamespace bool) error {
 	if len(metrics) == 0 {
 		return nil
 	}
-	w := kubectl.GetNewTabWriter(printer.out)
+	w := printers.GetNewTabWriter(printer.out)
 	defer w.Flush()
 
 	if withNamespace {
@@ -84,9 +93,20 @@ func (printer *TopCmdPrinter) PrintPodMetrics(metrics []metrics_api.PodMetrics, 
 	if printContainers {
 		printValue(w, PodColumn)
 	}
+
+	sort.Slice(metrics, func(i, j int) bool {
+		if withNamespace && metrics[i].Namespace != metrics[j].Namespace {
+			return metrics[i].Namespace < metrics[j].Namespace
+		}
+		return metrics[i].Name < metrics[j].Name
+	})
+
 	printColumnNames(w, PodColumns)
 	for _, m := range metrics {
-		printSinglePodMetrics(w, &m, printContainers, withNamespace)
+		err := printSinglePodMetrics(w, &m, printContainers, withNamespace)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -98,18 +118,24 @@ func printColumnNames(out io.Writer, names []string) {
 	fmt.Fprint(out, "\n")
 }
 
-func printSinglePodMetrics(out io.Writer, m *metrics_api.PodMetrics, printContainersOnly bool, withNamespace bool) {
+func printSinglePodMetrics(out io.Writer, m *metricsapi.PodMetrics, printContainersOnly bool, withNamespace bool) error {
 	containers := make(map[string]v1.ResourceList)
 	podMetrics := make(v1.ResourceList)
 	for _, res := range MeasuredResources {
 		podMetrics[res], _ = resource.ParseQuantity("0")
 	}
+
 	for _, c := range m.Containers {
-		containers[c.Name] = c.Usage
+		var usage v1.ResourceList
+		err := legacyscheme.Scheme.Convert(&c.Usage, &usage, nil)
+		if err != nil {
+			return err
+		}
+		containers[c.Name] = usage
 		if !printContainersOnly {
 			for _, res := range MeasuredResources {
 				quantity := podMetrics[res]
-				quantity.Add(c.Usage[res])
+				quantity.Add(usage[res])
 				podMetrics[res] = quantity
 			}
 		}
@@ -123,7 +149,7 @@ func printSinglePodMetrics(out io.Writer, m *metrics_api.PodMetrics, printContai
 			printMetricsLine(out, &ResourceMetricsInfo{
 				Name:      contName,
 				Metrics:   containers[contName],
-				Timestamp: m.Timestamp.Time.Format(time.RFC1123Z),
+				Available: v1.ResourceList{},
 			})
 		}
 	} else {
@@ -133,15 +159,15 @@ func printSinglePodMetrics(out io.Writer, m *metrics_api.PodMetrics, printContai
 		printMetricsLine(out, &ResourceMetricsInfo{
 			Name:      m.Name,
 			Metrics:   podMetrics,
-			Timestamp: m.Timestamp.Time.Format(time.RFC1123Z),
+			Available: v1.ResourceList{},
 		})
 	}
+	return nil
 }
 
 func printMetricsLine(out io.Writer, metrics *ResourceMetricsInfo) {
 	printValue(out, metrics.Name)
-	printAllResourceUsages(out, metrics.Metrics)
-	printValue(out, metrics.Timestamp)
+	printAllResourceUsages(out, metrics)
 	fmt.Fprint(out, "\n")
 }
 
@@ -149,11 +175,15 @@ func printValue(out io.Writer, value interface{}) {
 	fmt.Fprintf(out, "%v\t", value)
 }
 
-func printAllResourceUsages(out io.Writer, usage v1.ResourceList) {
+func printAllResourceUsages(out io.Writer, metrics *ResourceMetricsInfo) {
 	for _, res := range MeasuredResources {
-		quantity := usage[res]
+		quantity := metrics.Metrics[res]
 		printSingleResourceUsage(out, res, quantity)
 		fmt.Fprint(out, "\t")
+		if available, found := metrics.Available[res]; found {
+			fraction := float64(quantity.MilliValue()) / float64(available.MilliValue()) * 100
+			fmt.Fprintf(out, "%d%%\t", int64(fraction))
+		}
 	}
 }
 
@@ -163,9 +193,6 @@ func printSingleResourceUsage(out io.Writer, resourceType v1.ResourceName, quant
 		fmt.Fprintf(out, "%vm", quantity.MilliValue())
 	case v1.ResourceMemory:
 		fmt.Fprintf(out, "%vMi", quantity.Value()/(1024*1024))
-	case v1.ResourceStorage:
-		// TODO: Change it after storage metrics collection is finished.
-		fmt.Fprint(out, "-")
 	default:
 		fmt.Fprintf(out, "%v", quantity.Value())
 	}

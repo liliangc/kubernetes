@@ -25,8 +25,11 @@ import (
 	"path"
 	"strings"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/api/core/v1"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/kubernetes/pkg/features"
+	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
+	utilfile "k8s.io/kubernetes/pkg/util/file"
 )
 
 // Whether AppArmor should be disabled by default.
@@ -35,7 +38,8 @@ var isDisabledBuild bool
 
 // Interface for validating that a pod with with an AppArmor profile can be run by a Node.
 type Validator interface {
-	Validate(pod *api.Pod) error
+	Validate(pod *v1.Pod) error
+	ValidateHost() error
 }
 
 func NewValidator(runtime string) Validator {
@@ -58,12 +62,12 @@ type validator struct {
 	appArmorFS      string
 }
 
-func (v *validator) Validate(pod *api.Pod) error {
+func (v *validator) Validate(pod *v1.Pod) error {
 	if !isRequired(pod) {
 		return nil
 	}
 
-	if v.validateHostErr != nil {
+	if v.ValidateHost() != nil {
 		return v.validateHostErr
 	}
 
@@ -86,21 +90,30 @@ func (v *validator) Validate(pod *api.Pod) error {
 	return nil
 }
 
+func (v *validator) ValidateHost() error {
+	return v.validateHostErr
+}
+
 // Verify that the host and runtime is capable of enforcing AppArmor profiles.
 func validateHost(runtime string) error {
+	// Check feature-gates
+	if !utilfeature.DefaultFeatureGate.Enabled(features.AppArmor) {
+		return errors.New("AppArmor disabled by feature-gate")
+	}
+
 	// Check build support.
 	if isDisabledBuild {
-		return errors.New("Binary not compiled for linux.")
+		return errors.New("Binary not compiled for linux")
 	}
 
 	// Check kernel support.
-	if !isAppArmorEnabled() {
+	if !IsAppArmorEnabled() {
 		return errors.New("AppArmor is not enabled on the host")
 	}
 
 	// Check runtime support. Currently only Docker is supported.
-	if runtime != "docker" {
-		return fmt.Errorf("AppArmor is only enabled for 'docker' runtime. Found: %q.", runtime)
+	if runtime != kubetypes.DockerContainerRuntime && runtime != kubetypes.RemoteContainerRuntime {
+		return fmt.Errorf("AppArmor is only enabled for 'docker' and 'remote' runtimes. Found: %q.", runtime)
 	}
 
 	return nil
@@ -108,18 +121,27 @@ func validateHost(runtime string) error {
 
 // Verify that the profile is valid and loaded.
 func validateProfile(profile string, loadedProfiles map[string]bool) error {
-	if profile == "" || profile == ProfileRuntimeDefault {
+	if err := ValidateProfileFormat(profile); err != nil {
+		return err
+	}
+
+	if strings.HasPrefix(profile, ProfileNamePrefix) {
+		profileName := strings.TrimPrefix(profile, ProfileNamePrefix)
+		if !loadedProfiles[profileName] {
+			return fmt.Errorf("profile %q is not loaded", profileName)
+		}
+	}
+
+	return nil
+}
+
+func ValidateProfileFormat(profile string) error {
+	if profile == "" || profile == ProfileRuntimeDefault || profile == ProfileNameUnconfined {
 		return nil
 	}
 	if !strings.HasPrefix(profile, ProfileNamePrefix) {
 		return fmt.Errorf("invalid AppArmor profile name: %q", profile)
 	}
-
-	profileName := strings.TrimPrefix(profile, ProfileNamePrefix)
-	if !loadedProfiles[profileName] {
-		return fmt.Errorf("profile %q is not loaded", profileName)
-	}
-
 	return nil
 }
 
@@ -173,7 +195,7 @@ func getAppArmorFS() (string, error) {
 		}
 		if fields[2] == "securityfs" {
 			appArmorFS := path.Join(fields[1], "apparmor")
-			if ok, err := util.FileExists(appArmorFS); !ok {
+			if ok, err := utilfile.FileExists(appArmorFS); !ok {
 				msg := fmt.Sprintf("path %s does not exist", appArmorFS)
 				if err != nil {
 					return "", fmt.Errorf("%s: %v", msg, err)
@@ -192,11 +214,11 @@ func getAppArmorFS() (string, error) {
 	return "", errors.New("securityfs not found")
 }
 
-// isAppArmorEnabled returns true if apparmor is enabled for the host.
+// IsAppArmorEnabled returns true if apparmor is enabled for the host.
 // This function is forked from
 // https://github.com/opencontainers/runc/blob/1a81e9ab1f138c091fe5c86d0883f87716088527/libcontainer/apparmor/apparmor.go
 // to avoid the libapparmor dependency.
-func isAppArmorEnabled() bool {
+func IsAppArmorEnabled() bool {
 	if _, err := os.Stat("/sys/kernel/security/apparmor"); err == nil && os.Getenv("container") == "" {
 		if _, err = os.Stat("/sbin/apparmor_parser"); err == nil {
 			buf, err := ioutil.ReadFile("/sys/module/apparmor/parameters/enabled")
